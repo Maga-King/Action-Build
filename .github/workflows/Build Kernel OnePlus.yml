@@ -1047,6 +1047,9 @@ jobs:
           else
             patch -p1 --forward < "${PATCH_DIR}/ntsync/ntsync_compat_$([ -f "${PATCH_DIR}/ntsync/ntsync_compat_${KMI}_${ANDROID_SHORT_VERSION}.patch" ] && echo "${KMI}_${ANDROID_SHORT_VERSION}" || echo "${KMI}").patch" || true
           fi
+          echo "添加 Lindroid EVDI DRM 驱动补丁..."
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/evdi_drm.patch
+          patch -p1 -F 3 < evdi_drm.patch || true
           source $REJ_CHECKER
           check_rejects .
 
@@ -1219,6 +1222,7 @@ jobs:
             set_config "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
             set_config "CONFIG_NETFILTER_XT_TARGET_LOG=y"
             set_config "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
+            set_config "CONFIG_USER_NS=y"
           fi
 
           # IPSET & IPv6_NAT配置*
