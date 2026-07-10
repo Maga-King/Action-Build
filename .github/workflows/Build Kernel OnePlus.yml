@@ -29,6 +29,7 @@ on:
           - oneplus_nord_ce4_b
           - oneplus_12_b
           - oneplus_pad_go_2_b
+          - oneplus_turbo_6x_b
           - oneplus_nord_ce4_lite_5g_b
           - oneplus_nord_ce6_lite_b
           - oneplus_turbo_6v
@@ -61,14 +62,6 @@ on:
           - oneplus_pad_3_pro
           - oneplus_pad_4
           - oneplus_ace6_ultra
-      MANAGER_SOURCE:
-        type: choice
-        description: "管理器调用方向//Manager download source"
-        required: true
-        default: OFFICIAL
-        options:
-          - OFFICIAL
-          - SPOOF
       SUSFS_CI:
         type: choice
         description: "SUSFS模块下载调用方向//SUSFS module branch"
@@ -102,6 +95,11 @@ on:
         description: "自定义构建时间(输入F使用UTCT或-1关闭)//Custom build time (Enter F to use UTCT, or -1 to disable)"
         required: false
         default: "Fri Dec 12 11:37:03 UTC 2025"
+      KSU_META:
+        type: string
+        description: "管理器分支名(必填)/内置分支名(必填)/回退分支提交哈希版本(留空不修改)//Manager Branch name (Required) / Builtin branch name (Required) / Rollback branch commit hash version (Leave blank to not modify)"
+        required: false
+        default: "dev/dev-susfs/"
       LZ4_UPDATE:
         type: boolean
         description: "是否升级LZ4到上游最新？//Upgrade LZ4 to the latest upstream?"
@@ -321,10 +319,10 @@ jobs:
           echo "Selected ANDROID_VERSION: ${{ env.ANDROID_VERSION }}"
           echo "Selected BUILD_METHOD: ${{ env.BUILD_METHOD }}"
           echo "Selected FILE: ${{ github.event.inputs.FILE }}"
-          echo "Selected MANAGER_SOURCE: ${{ github.event.inputs.MANAGER_SOURCE }}"
           echo "Selected SUSFS_CI: ${{ github.event.inputs.SUSFS_CI }}"
           echo "Selected KPM: ${{ github.event.inputs.KPM }}"
           echo "Custom SUSFS_META: ${{ github.event.inputs.SUSFS_META }}"
+          echo "Custom KSU_META: ${{ github.event.inputs.KSU_META }}"
           echo "Selected ZRAM: ${{ github.event.inputs.ZRAM }}"
           echo "Selected LSM_BBG: ${{ github.event.inputs.LSM_BBG }}"
           echo "Selected NETFILTER: ${{ github.event.inputs.NETFILTER }}"
@@ -468,7 +466,7 @@ jobs:
           else
             echo "✅ APT 缓存命中，跳过 apt-get update"
           fi
-          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache-debs" python3 git curl libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix kmod libdw-dev elfutils dwarves
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache-debs" python3 git curl libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix kmod libdw-dev elfutils dwarves kotlin
           sudo rm -f ~/apt-cache-debs/lock
           sudo rm -rf ~/apt-cache-debs/partial
 
@@ -711,32 +709,32 @@ jobs:
             chmod +x "$f"
           done
 
-      - name: Resolve Manager Source
-        id: manager
-        run: |
-          MANAGER_SOURCE="${{ github.event.inputs.MANAGER_SOURCE }}"
-
-          case "$MANAGER_SOURCE" in
-            SPOOF)
-              BRANCH="dev"
-              ARTIFACT="manager-spoofed"
-              ;;
-            OFFICIAL|*)
-              BRANCH="dev"
-              ARTIFACT="manager"
-              ;;
-          esac
-
-          echo "manager_branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "manager_artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
-
       - name: Add KernelSU Next
         run: |
           cd kernel_workspace/kernel_platform
-          MANAGER_BRANCH="${{ steps.manager.outputs.manager_branch }}"
-          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/${MANAGER_BRANCH}/kernel/setup.sh" | bash -s dev-susfs
-          cd KernelSU-Next
-          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=${MANAGER_BRANCH}&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+          KSU_META="${{ github.event.inputs.KSU_META }}"
+
+          # 必须包含两个分隔符（至少三个字段）
+          if [[ "$(grep -o '/' <<< "$KSU_META" | wc -l)" -lt 2 ]]; then
+            echo "错误: KSU_META 参数缺少必要的分隔符 '/'，格式应为: 管理器分支名/内置分支名/提交hash(可省略)"
+            exit 10
+          fi
+
+          # 解析字段：分支 / 自定义标识 / 手动 hash
+          IFS='/' read -r KSU_MANAGER_BRANCH KSU_BUILTIN_BRANCH MANUAL_HASH <<< "$KSU_META"
+          echo "KSU_MANAGER_BRANCH=$KSU_MANAGER_BRANCH" >> $GITHUB_ENV
+          echo "KSU_BUILTIN_BRANCH=$KSU_BUILTIN_BRANCH" >> $GITHUB_ENV
+          [[ -n "$MANUAL_HASH" ]] && echo "手动指定 hash: $MANUAL_HASH" || echo "手动指定 hash: 未启用"
+
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/${KSU_MANAGER_BRANCH}/kernel/setup.sh" | bash -s "$KSU_BUILTIN_BRANCH"
+          cd ./KernelSU-Next
+
+          if [[ -n "$MANUAL_HASH" ]]; then
+            git fetch origin "$KSU_BUILTIN_BRANCH" --depth=50
+            git checkout "$MANUAL_HASH"
+          fi
+
+          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=${KSU_MANAGER_BRANCH}&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
           KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
@@ -745,76 +743,7 @@ jobs:
       - name: Apply Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
-          cd kernel_workspace/kernel_platform/common
-          if [ "$KMI" = "android12-5.10" ]; then
-            if [ "$SUBLEVEL" -le "43" ]; then
-              echo "Applying base.c Android 12 5.10 Fake Patch"
-              perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,/size_t this_len = min_t(size_t,/;' fs/proc/base.c
-            fi
-            if [ "$SUBLEVEL" -le "117" ]; then
-              echo "Applying fdinfo.c Android 12 5.10 Fake Patch"
-              sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
-              perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
-              perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
-            fi
-          fi
-          if [ "$KMI" = "android13-5.15" ]; then
-            if [ "$SUBLEVEL" -le "41" ]; then
-              echo "Applying namespace.c Android 13 5.15 SUSFS fixes"
-              sed -i '/^#include <linux\/shmem_fs.h>$/a #include <linux/mnt_idmapping.h>' fs/namespace.c
-              echo "Applying open.c Android 13 5.15 Fake Patch"
-              sed -i '/^#include <linux\/compat.h>$/a #include <linux/mnt_idmapping.h>' fs/open.c
-              echo "Applying fdinfo.c Android 13 5.15 Fake Patch"
-              sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
-              perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
-              perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
-            fi
-            if [ "$SUBLEVEL" -ge "123" ]; then
-              echo "Applying memory.c Android 13 5.15 Fake Patch"
-              sed -i '/#include <linux\/swap_slots\.h>/d' ./mm/memory.c
-            fi
-            if [ "$SUBLEVEL" -ge "197" ]; then
-              echo "Applying namespace.c Android 13 5.15 Fake Patch"
-              sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
-            fi
-            if [ "$SUBLEVEL" -ge "206" ]; then
-              echo "Applying task_mmu.c Android 13 5.15 Fake Patch"
-              sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
-            fi
-          fi
-          if [ "$KMI" = "android14-6.1" ]; then
-            if [ "$SUBLEVEL" -le "141" ]; then
-              echo "Applying base.c Android 14 6.1 Fake Patch"
-              sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
-            fi
-            if [ "$SUBLEVEL" -ge "157" ]; then
-              echo "Applying namespace.c Android 14 6.1 Fake Patch"
-              sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
-            fi
-          fi
-          if [ "$KMI" = "android15-6.6" ]; then
-            if [ "$SUBLEVEL" -le "30" ]; then
-              echo "Applying taskmmu.c、namespace.c Android 15 6.6 Fake Patch"
-              sed -i '/smap_gather_stats(vma, &mss, last_vma_end);/a\last_vma_end = vma->vm_end;' fs/proc/task_mmu.c
-              perl -0777 -i -pe '@l=split/\n/;for($i=$#l;$i>=0;$i--){if($l[$i]=~/last_vma_end = vma->vm_end;/){$l[$i]="\t\t\t\t".$l[$i];splice(@l,$i+1,0,"\t\t\t}");for($j=$i;$j>=0;$j--){if($l[$j]=~/if\s*\(vma->vm_end > last_vma_end\)/){$l[$j]=~s/\)\s*$/) {/;last}}last}}$_=join"\n",@l' fs/proc/task_mmu.c
-              sed -i '/#include <trace\/hooks\/blk\.h>/a #include <trace\/hooks\/fs.h>' ./fs/namespace.c
-              sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
-            fi
-            if [ "$SUBLEVEL" -le "57" ]; then
-              echo "Applying memory.c Android 15 6.6 Fake Patch"
-              sed -i '/^#include <linux\/sched\/sysctl.h>$/a #include <linux/zswap.h>' mm/memory.c
-            fi
-            if [ "$SUBLEVEL" -le "92" ]; then
-              echo "Applying base.c Android 15 6.6 Fake Patch"
-              sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
-            fi
-          fi
-          if [ "$KMI" = "android16-6.12" ]; then
-            if [ "$SUBLEVEL" -ge "58" ]; then
-              echo "Applying exec.c Android 16 6.12 Fake Patch"
-              sed -i '/^#include <linux\/dma-buf.h>$/d' fs/exec.c
-            fi
-          fi
+          kotlinc -script "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/PatchFakePatches.kts" apply "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
 
       - name: Apply Patches KernelSU Next
         env:
@@ -879,76 +808,7 @@ jobs:
       - name: Revert Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
-          cd kernel_workspace/kernel_platform/common
-          if [ "$KMI" = "android12-5.10" ]; then
-            if [ "$SUBLEVEL" -le "43" ]; then
-              echo "Reverting base.c Android 12 5.10 Fake Patch"
-              sed -i 's/^size_t this_len = min_t(size_t, count, PAGE_SIZE);$/int this_len = min_t(int, count, PAGE_SIZE);/' fs/proc/base.c
-            fi
-            if [ "$SUBLEVEL" -le "117" ]; then
-              echo "Reverting fdinfo.c Android 12 5.10 Fake Patch"
-              perl -i -pe 's/^(\s+if \(inode\) \{)/$1\n\t\t\/\*\n\t\t * IN_ALL_EVENTS represents all of the mask bits\n\t\t * that we expose to userspace.  There is at\n\t\t * least one bit (FS_EVENT_ON_CHILD) which is\n\t\t * used only internally to the kernel.\n\t\t *\/\n\t\tu32 mask = mark->mask & IN_ALL_EVENTS;/m' fs/notify/fdinfo.c
-              perl -i -pe 's/\binotify_mark_user_mask\(mark\)/mask, mark->ignored_mask/g' fs/notify/fdinfo.c
-              perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
-            fi
-          fi
-          if [ "$KMI" = "android13-5.15" ]; then
-            if [ "$SUBLEVEL" -le "41" ]; then
-              echo "Reverting namespace.c Android 13 5.15 Fake Patch"
-              sed -i '/#include <linux\/mnt_idmapping.h>$/d' fs/namespace.c
-              echo "Reverting open.c Android 13 5.15 Fake Patch"
-              sed -i '/#include <linux\/mnt_idmapping.h>$/d' fs/open.c
-              echo "Reverting fdinfo.c Android 13 5.15 Fake Patch"
-              perl -i -pe 's/^(\s+if \(inode\) \{)/$1\n\t\t\/\*\n\t\t * IN_ALL_EVENTS represents all of the mask bits\n\t\t * that we expose to userspace.  There is at\n\t\t * least one bit (FS_EVENT_ON_CHILD) which is\n\t\t * used only internally to the kernel.\n\t\t *\/\n\t\tu32 mask = mark->mask & IN_ALL_EVENTS;/m' fs/notify/fdinfo.c
-              perl -i -pe 's/\binotify_mark_user_mask\(mark\)/mask, mark->ignored_mask/g' fs/notify/fdinfo.c
-              perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
-              sed -i 's|i_uid_into_mnt(i_user_ns(&fi->inode), &fi->inode).val|i_uid_into_mnt(\&init_user_ns, \&fi->inode).val|g' fs/susfs.c
-              sed -i 's|i_uid_into_mnt(i_user_ns(inode), inode).val|i_uid_into_mnt(\&init_user_ns, inode).val|g' fs/susfs.c
-            fi
-            if [ "$SUBLEVEL" -ge "123" ]; then
-              echo "Reverting memory.c Android 13 5.15 Fake Patch"
-              sed -i '/#ifdef CONFIG_KSU_SUSFS_SUS_MAP/i #include <linux/swap_slots.h>' ./mm/memory.c
-            fi
-            if [ "$SUBLEVEL" -ge "197" ]; then
-              echo "Reverting namespace.c Android 13 5.15 Fake Patch"
-              sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
-            fi
-            if [ "$SUBLEVEL" -ge "206" ]; then
-              echo "Reverting task_mmu.c Android 13 5.15 Fake Patch"
-              sed -i '/^#include <linux\/pkeys.h>$/a #include <trace/hooks/mm.h>' fs/proc/task_mmu.c
-            fi
-          fi
-          if [ "$KMI" = "android14-6.1" ]; then
-            if [ "$SUBLEVEL" -le "141" ]; then
-              echo "Reverting base.c Android 14 6.1 Fake Patch"
-              sed -i '/^#include <linux\/dma-buf.h>$/d' fs/proc/base.c
-            fi
-            if [ "$SUBLEVEL" -ge "157" ]; then
-              echo "Reverting namespace.c Android 14 6.1 Fake Patch"
-              sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
-            fi
-          fi
-          if [ "$KMI" = "android15-6.6" ]; then
-            if [ "$SUBLEVEL" -le "30" ]; then
-              echo "Reverting taskmmu.c、namespace.c Android 15 6.6 Fake Patch"
-              sed -i '/#include <trace\/hooks\/fs\.h>/d' ./fs/namespace.c
-              sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
-            fi
-            if [ "$SUBLEVEL" -le "57" ]; then
-              echo "Reverting memory.c Android 15 6.6 Fake Patch"
-              sed -i '/^#include <linux\/zswap.h>$/d' mm/memory.c
-            fi
-            if [ "$SUBLEVEL" -le "92" ]; then
-              echo "Reverting base.c Android 15 6.6 Fake Patch"
-              sed -i '/^#include <linux\/dma-buf.h>$/d' fs/proc/base.c
-            fi
-          fi
-          if [ "$KMI" = "android16-6.12" ]; then
-            if [ "$SUBLEVEL" -ge "58" ]; then
-              echo "Reverting exec.c Android 16 6.12 Fake Patch"
-              sed -i '/^#include /a #include <linux/dma-buf.h>' fs/exec.c
-            fi
-          fi
+          kotlinc -script "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/PatchFakePatches.kts" revert "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
 
       # OGKI转换GKI，无需修改 dtbo 开机
       - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
@@ -991,6 +851,9 @@ jobs:
           sed -i '$a \#Re-Kernel Support\nobj-$(CONFIG_REKERNEL) += rekernel/' drivers/Makefile
           mkdir -p drivers/rekernel
           cp -r "${RE_DIR}"/* drivers/rekernel/
+          if [ -f BUILD.bazel ]; then
+            sed -i '/"kernel_aarch64": {/,/"kernel_aarch64_16k": {/ s|"module_implicit_outs": get_gki_modules_list("arm64")|"module_implicit_outs": get_gki_modules_list("arm64") + ["drivers/rekernel/rekernel.ko"]|' BUILD.bazel
+          fi
 
       - name: Apply DROID_SPACES
         env:
@@ -1225,7 +1088,7 @@ jobs:
             set_config "CONFIG_USER_NS=y"
           fi
 
-          # IPSET & IPv6_NAT配置*
+          # IPSET & IPv6_NAT & TTL配置*
           if [ "${{ github.event.inputs.NETFILTER }}" = "true" ]; then
             if [[ "$KERNEL_VERSION" != "6.12" && "${CPU}" != mt* ]]; then
               set_config "CONFIG_BPF_STREAM_PARSER=y"
@@ -1252,6 +1115,14 @@ jobs:
             set_config "CONFIG_IP_SET_LIST_SET=y"
             set_config "CONFIG_IP6_NF_NAT=y"
             set_config "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
+            set_config "CONFIG_NETFILTER_XT_TARGET_HL=y"
+            set_config "CONFIG_IP_NF_TARGET_TTL=y"
+            set_config "CONFIG_IP6_NF_TARGET_HL=y"
+            set_config "CONFIG_NETFILTER_XT_MATCH_HL=y"
+            set_config "CONFIG_IP_NF_MATCH_TTL=y"
+            set_config "CONFIG_IP6_NF_MATCH_HL=y"
+            set_config "CONFIG_IP_NF_MANGLE=y"
+            set_config "CONFIG_IP6_NF_MANGLE=y"
           fi
 
           # 构建依赖项调整及优化
@@ -1570,7 +1441,7 @@ jobs:
         continue-on-error: true
         run: |
           LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success&event=push" | \
             jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
           if [ -z "$LATEST_RUN_ID" ]; then
             echo "No successful run found for branch v1.5.2+"
@@ -1597,16 +1468,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MANAGER_BRANCH="${{ steps.manager.outputs.manager_branch }}"
-          MANAGER_ARTIFACT="${{ steps.manager.outputs.manager_artifact }}"
+          MANAGER_ARTIFACT=manager
 
-          echo "Using branch: $MANAGER_BRANCH"
+          echo "Using branch: $KSU_MANAGER_BRANCH"
           echo "Downloading artifact: $MANAGER_ARTIFACT"
 
-          run_id=$(gh api "repos/KernelSU-Next/KernelSU-Next/actions/workflows/build-manager-ci.yml/runs?branch=$MANAGER_BRANCH&status=success&per_page=1" --jq '.workflow_runs[0].id' || echo "")
+          run_id=$(gh api "repos/KernelSU-Next/KernelSU-Next/actions/workflows/build-manager-ci.yml/runs?branch=$KSU_MANAGER_BRANCH&status=success&event=push&per_page=1" --jq '.workflow_runs[0].id' || echo "")
 
           if [[ -z "$run_id" ]]; then
-            echo "No successful workflow run found on branch $MANAGER_BRANCH. Skipping download."
+            echo "No successful workflow run found on branch $KSU_MANAGER_BRANCH. Skipping download."
             exit 0
           fi
           artifact_url=$(gh api "repos/KernelSU-Next/KernelSU-Next/actions/runs/$run_id/artifacts" | jq -r ".artifacts[] | select(.name == \"$MANAGER_ARTIFACT\") | .archive_download_url" | head -n1)

@@ -122,6 +122,13 @@ Prohibit the promotion of forked repositories with **no modifications**; see [LI
  
 - Support `Baseband-guard(LSMBBG)`.  
  
+- Support setting branches、custom version identifiers、fallback hash.  
+```
+Set Branch: Divided into manager-layer and built-in-layer. Please modify according to the channel name in the KernelSU Next repository. Do not modify unless you are a developer. Do not leave it empty or remove it.
+The commit hash referred to here is the built-in-layer.
+Here must be separated by two /(U+002F) and cannot be removed.
+```  
+ 
 - Fully automated retrieval of kernel information and build information.  
  
 - Allow modifying `SUBLEVEL`,Used to fix the issue where the device fails to boot after a system update changes the `SUBLEVEL` but the kernel source has not been updated.  
@@ -142,8 +149,6 @@ When there is a kernel-level update or a significant slowdown caused by changes 
 ```  
  
 - First to support for the kernel version `6.6+` new `setlocalversion` format using `echo`, fixing the issue where custom and randomly-generated pseudo-official suffixes were not applied. Now, this feature is fully supported across all device models and build methods.  
- 
-- Add `TRUSTY_EXISTS` to automatically detect whether the `6.6` kernel has defects in the kernel source code and determine whether `sed` is needed.  
  
 - Fix issues where `ZRAM` is unusable or unable to launch non-system apps.  
  
