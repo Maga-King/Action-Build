@@ -174,6 +174,15 @@ on:
         description: "是否停用此次缓存？//Disable caching for this build?"
         required: true
         default: false
+      C17_BOOTLOG:
+        type: choice
+        description: "OP13 6.6.118 临时日志内核（permissive 会锁定全局宽容，非日用）"
+        required: true
+        default: "off"
+        options:
+          - "off"
+          - enforcing
+          - permissive
 
 jobs:
   build:
@@ -188,6 +197,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Validate C17 diagnostic selection
+        if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        env:
+          SELECTED_DEVICE: ${{ inputs.FILE }}
+          SPOOF_SUBLEVEL: ${{ inputs.RESUBLEVEL }}
+          FAST_SELECTED: ${{ inputs.FAST_BUILD }}
+        run: |
+          test "$SELECTED_DEVICE" = oneplus_13_b
+          test -z "$SPOOF_SUBLEVEL"
+          test "$FAST_SELECTED" = true
+          echo 'C17 boot diagnostics: real OP13 6.6.118 only, no SUBLEVEL spoofing.'
 
       - name: Maximize Build Space
         if: ${{ github.event.inputs.SPACE_NOCLEAN == 'false' }}
@@ -1131,6 +1152,15 @@ jobs:
             set_config "CONFIG_ANDROID_BINDER_IPC_RUST=m"
           fi
 
+      - name: Prepare C17 boot diagnostics
+        if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        env:
+          DIAGNOSTIC_MODE: ${{ inputs.C17_BOOTLOG }}
+        run: |
+          python3 scripts/c17_bootlog.py prepare \
+            --kernel kernel_workspace/kernel_platform/common \
+            --mode "$DIAGNOSTIC_MODE" --report c17-bootlog-report
+
       - name: Fix IPv6_NAT Error
         if: ${{ github.event.inputs.NETFILTER == 'true' }}
         run: |
@@ -1373,12 +1403,21 @@ jobs:
           fi
 
           make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
+          if [[ "${{ inputs.C17_BOOTLOG }}" != "" && "${{ inputs.C17_BOOTLOG }}" != off ]]; then
+            python3 "$GITHUB_WORKSPACE/scripts/c17_bootlog.py" verify \
+              --kernel "$PWD" --mode "${{ inputs.C17_BOOTLOG }}" \
+              --report "$GITHUB_WORKSPACE/c17-bootlog-report"
+          fi
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
           ccache -s
 
       - name: Fallback to Build Kernel
         if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
         run: |
+          if [[ "${{ inputs.C17_BOOTLOG }}" != "" && "${{ inputs.C17_BOOTLOG }}" != off ]]; then
+            echo 'Diagnostic configuration is verified only for FAST build; refusing unchecked fallback.' >&2
+            exit 1
+          fi
           cd kernel_workspace
           if [ -f ./kernel_platform/build_with_bazel.py ]; then
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
@@ -1494,10 +1533,29 @@ jobs:
         run: |
           echo "value=${{ env.ZRAM_ALGO_U && format('_{0}', env.ZRAM_ALGO_U) || '' }}${{ github.event.inputs.KPM == 'KPM' && '_KPM' || github.event.inputs.KPM == 'KPN' && '_KPN' || '' }}${{ github.event.inputs.LSM_BBG == 'true' && '_BBG' || '' }}_ILH${{ github.event.inputs.SCHED_HMBIRD== 'true' && '_HMBIRD' || '' }}${{ github.event.inputs.DROID_SPACES== 'true' && '_DS' || '' }}${{ github.event.inputs.RE_KERNEL == 'true' && '_REKER' || '' }}${{ github.event.inputs.LZ4_UPDATE == 'true' && '_LZ4UPD' || '' }}" >> $GITHUB_OUTPUT
 
+      - name: Package C17 diagnostic helpers
+        if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        env:
+          DIAGNOSTIC_MODE: ${{ inputs.C17_BOOTLOG }}
+        run: |
+          python3 scripts/c17_bootlog.py package \
+            --kernel kernel_workspace/kernel_platform/common \
+            --mode "$DIAGNOSTIC_MODE" --report c17-bootlog-report
+          cp scripts/c17-bootlog/README.txt AnyKernel3/C17-BOOTLOG-README.txt
+          printf '%s\n' "$DIAGNOSTIC_MODE" > AnyKernel3/C17-DIAGNOSTIC-MODE.txt
+
+      - name: Upload C17 diagnostic evidence and optional metadata collector
+        if: ${{ always() && inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: C17-BootLog-${{ inputs.C17_BOOTLOG }}-${{ github.run_id }}
+          path: c17-bootlog-report/
+          if-no-files-found: warn
+
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v7
         with:
-          name: AnyKernel3_KernelSUNext_${{ env.KSUVER }}_${{ steps.extract_info.outputs.value }}(${{ env.CKERNEL_VERSION }})${{ steps.suffix.outputs.value }}
+          name: AnyKernel3_KernelSUNext_${{ env.KSUVER }}_${{ steps.extract_info.outputs.value }}(${{ env.CKERNEL_VERSION }})${{ steps.suffix.outputs.value }}${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' && format('_C17LOG-{0}', inputs.C17_BOOTLOG) || '' }}
           path: ./AnyKernel3/*
 
       - name: Extract and Process ZRAM Module

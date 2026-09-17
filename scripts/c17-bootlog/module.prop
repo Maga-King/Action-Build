@@ -1,0 +1,6 @@
+id=c17_metadata_bootlog
+name=C17 diagnostic log archive (optional)
+version=1.0
+versionCode=1
+author=Maga-King
+description=One-shot pstore and boot-log backup to random files in /metadata/c17-bootlogs. Does not capture before post-fs-data.
