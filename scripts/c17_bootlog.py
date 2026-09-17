@@ -11,12 +11,25 @@ import subprocess
 import zipfile
 
 REQUIRED = {
+    "ARM64": "y",
     "PRINTK": "y", "PRINTK_TIME": "y", "IKCONFIG": "y", "IKCONFIG_PROC": "y",
     "LOG_BUF_SHIFT": "22", "KALLSYMS": "y", "PSTORE": "y", "PSTORE_RAM": "y",
     "PSTORE_CONSOLE": "y", "PSTORE_PMSG": "y", "PSTORE_DEFAULT_KMSG_BYTES": "262144",
     "SECURITY_SELINUX": "y", "SECURITY_SELINUX_DEVELOP": "y",
     "OF": "y", "OF_RESERVED_MEM": "y",
 }
+
+SELINUX_FILES = ("security/selinux/include/security.h", "security/selinux/hooks.c",
+                 "security/selinux/selinuxfs.c")
+
+def selinux_hashes(kernel):
+    result = {}
+    for name in SELINUX_FILES:
+        data = (kernel / name).read_bytes()
+        if b"C17_BOOTLOG:" in data:
+            raise RuntimeError("Old forced-permissive patch present: " + name)
+        result[name] = hashlib.sha256(data).hexdigest()
+    return result
 
 RAM_ANCHOR = "\tif (!pdata->mem_size || (!pdata->record_size && !pdata->console_size &&"
 RAM_PATCH = """\t/* C17_BOOTLOG: use only the existing OP13 reserved region. */
@@ -40,7 +53,13 @@ def early_ramoops_source(original):
     """Bind the existing qcom DT node before userspace, without duplicate devices."""
     fragment = (Path(__file__).parent / "c17-bootlog/ramoops-qcom-early.c").read_text()
     patched = replace_once(original, "#include <linux/of_address.h>\n",
-                           "#include <linux/of_address.h>\n#include <linux/of_reserved_mem.h>\n")
+                           "#include <linux/of_address.h>\n#include <linux/of_reserved_mem.h>\n"
+                           "#include <asm/cacheflush.h>\n")
+    retention = (Path(__file__).parent / "c17-bootlog/ramoops-flush.c").read_text()
+    anchor = "static int notrace ramoops_pstore_write(struct pstore_record *record)"
+    patched = replace_once(patched, anchor, retention + "\n" + anchor)
+    anchor = "\tpersistent_ram_write(prz, record->buf, size);"
+    patched = replace_once(patched, anchor, anchor + "\n\tc17_ramoops_flush_dump(cxt, prz);")
     anchor = "static int ramoops_parse_dt(struct platform_device *pdev,"
     patched = replace_once(patched, anchor, fragment + "\n" + anchor)
     anchor = '\tdev_dbg(&pdev->dev, "using Device Tree\\n");'
@@ -52,7 +71,9 @@ def early_ramoops_source(original):
     anchor = '\t/*\n\t * Update the module parameter variables as well so they are visible'
     patched = replace_once(patched, anchor,
         '\tif (of_device_is_compatible(dev_of_node(dev), "qcom,ramoops"))\n'
-        '\t\tdev_info(dev, "C17_BOOTLOG_V2: early DT backend ready\\n");\n\n' + anchor)
+        '\t\tdev_info(dev, "C17_BOOTLOG_V3: early DT backend ready; cached dump flush enabled\\n");\n\n' + anchor)
+    patched = replace_once(patched, '\tmem_size = pdata->mem_size;',
+                           '\tmem_type = pdata->mem_type;\n\tmem_size = pdata->mem_size;')
     return replace_once(patched, RAM_ANCHOR, RAM_PATCH + RAM_ANCHOR)
 
 def replace_once(text, old, new):
@@ -69,32 +90,24 @@ def config_values(path):
     return dict(re.findall(r"^CONFIG_([A-Z0-9_]+)=(.*)$", path.read_text(), re.M))
 
 def prepare(kernel, mode, report):
+    if mode != "enforcing":
+        raise RuntimeError("Only logging-only/enforcing builds are allowed; permissive retired")
     if version(kernel) != "6.6.118":
         raise RuntimeError("Refusing a kernel other than actual 6.6.118")
     edits = {}
+    original_selinux = selinux_hashes(kernel)
     ram = kernel / "fs/pstore/ram.c"
     original = ram.read_text()
     if "C17_BOOTLOG:" in original:
         raise RuntimeError("Diagnostic patch is already present; use a clean source tree")
     edits[ram] = early_ramoops_source(original)
-    if mode == "permissive":
-        security = kernel / "security/selinux/include/security.h"
-        edits[security] = replace_once(security.read_text(),
-            "\tWRITE_ONCE(selinux_state.enforcing, value);",
-            "\t/* C17_BOOTLOG: temporary diagnostic kernel, truthfully permissive. */\n"
-            "\tWRITE_ONCE(selinux_state.enforcing, false);")
-        hooks = kernel / "security/selinux/hooks.c"
-        edits[hooks] = replace_once(hooks.read_text(),
-            "\tenforcing_set(selinux_enforcing_boot);",
-            "\t/* C17_BOOTLOG: keep boot message and effective state consistent. */\n"
-            "\tselinux_enforcing_boot = 0;\n\tenforcing_set(selinux_enforcing_boot);")
-        fs = kernel / "security/selinux/selinuxfs.c"
-        edits[fs] = replace_once(fs.read_text(),
-            "\tnew_value = !!scan_value;",
-            "\t/* C17_BOOTLOG: init cannot re-enable enforcing in this debug build. */\n"
-            "\tif (scan_value)\n"
-            "\t\tpr_warn_once(\"C17_BOOTLOG: enforcing request overridden; diagnostic kernel is PERMISSIVE\\n\");\n"
-            "\tnew_value = false;")
+    reboot = kernel / "kernel/reboot.c"
+    anchor = "void kernel_restart(char *cmd)\n{\n\tkernel_restart_prepare(cmd);"
+    edits[reboot] = replace_once(reboot.read_text(), anchor,
+        "void kernel_restart(char *cmd)\n{\n"
+        "\t/* C17_BOOTLOG_V3: save while devices still work; keep final dump too. */\n"
+        '\tpr_emerg("C17_BOOTLOG_V3: reboot requested command=%s\\n", cmd ? cmd : "(null)");\n'
+        "\tkmsg_dump(KMSG_DUMP_SHUTDOWN);\n\tkernel_restart_prepare(cmd);")
     cfg = kernel / "arch/arm64/configs/gki_defconfig"
     text = cfg.read_text()
     for key, value in REQUIRED.items():
@@ -120,7 +133,12 @@ def prepare(kernel, mode, report):
         "original_layout": "0x240000 total, 0x40000 console, 0x200000 pmsg, no dmesg",
         "new_layout": "0x40000 dmesg, 0x100000 console, 0x100000 pmsg",
         "cold_boot_retention_guaranteed": False,
-        "diagnostic_revision": 2,
+        "diagnostic_revision": 3,
+        "selinux_sources_unchanged": original_selinux == selinux_hashes(kernel),
+        "selinux_source_hashes": original_selinux,
+        "dump_cache_clean": "ARM64 PoC, existing cached OP13 zones only, on dmesg dump",
+        "early_reboot_snapshot": True,
+        "reboot_source_sha256": hashlib.sha256(edits[reboot].encode()).hexdigest(),
         "early_backend": "builtin ramoops binds existing qcom,ramoops DT device",
         "vendor_module_removed": False,
         "ram_source_sha256": hashlib.sha256(edits[ram].encode()).hexdigest(),
@@ -128,6 +146,8 @@ def prepare(kernel, mode, report):
     print(f"Prepared OP13 {version(kernel)} diagnostic mode={mode}")
 
 def verify(kernel, mode, report):
+    if mode != "enforcing":
+        raise RuntimeError("Permissive builds are no longer allowed")
     config = kernel / "out/.config"
     actual = config_values(config)
     errors = [f"CONFIG_{k}: wanted {v}, got {actual.get(k)}"
@@ -139,14 +159,14 @@ def verify(kernel, mode, report):
     if hashlib.sha256(ram_source.encode()).hexdigest() != evidence.get("ram_source_sha256"):
         errors.append("Ramoops source differs from the prepared and recorded patch")
     for required in ('ramoops_parse_op13_dt', '"qcom,ramoops"',
-                     'C17_BOOTLOG_V2: early DT backend ready', 'postcore_initcall(ramoops_init)'):
+                     'C17_BOOTLOG_V3: early DT backend ready', 'postcore_initcall(ramoops_init)',
+                     'c17_ramoops_flush_dump(cxt, prz);'):
         if required not in ram_source:
             errors.append(f"Early ramoops source missing: {required}")
-    security = (kernel / "security/selinux/include/security.h").read_text()
-    if mode == "permissive" and "WRITE_ONCE(selinux_state.enforcing, false);" not in security:
-        errors.append("Permissive source patch missing")
-    if mode == "enforcing" and "C17_BOOTLOG:" in security:
-        errors.append("Unexpected force-permissive patch in enforcing mode")
+    if selinux_hashes(kernel) != evidence.get("selinux_source_hashes"):
+        errors.append("SELinux source changed after logging preparation")
+    if hashlib.sha256((kernel / "kernel/reboot.c").read_bytes()).hexdigest() != evidence.get("reboot_source_sha256"):
+        errors.append("Reboot source changed after logging preparation")
     shutil.copyfile(config, report / "effective-kernel.config")
     (report / "configuration-validation.json").write_text(json.dumps({
         "passed": not errors, "errors": errors, "mode": mode,
@@ -177,7 +197,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("prepare", "verify", "package"))
     parser.add_argument("--kernel", required=True, type=Path)
-    parser.add_argument("--mode", required=True, choices=("enforcing", "permissive"))
+    parser.add_argument("--mode", required=True, choices=("enforcing",))
     parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args()
     args.report.mkdir(parents=True, exist_ok=True)

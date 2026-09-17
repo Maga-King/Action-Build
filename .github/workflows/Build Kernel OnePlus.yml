@@ -176,13 +176,12 @@ on:
         default: false
       C17_BOOTLOG:
         type: choice
-        description: "OP13 6.6.118 临时日志内核（permissive 会锁定全局宽容，非日用）"
+        description: "OP13 6.6.118 V3 日志内核（保留原 SELinux 行为，不提供强制宽容）"
         required: true
         default: "off"
         options:
           - "off"
           - enforcing
-          - permissive
 
 jobs:
   build:
@@ -201,10 +200,12 @@ jobs:
           SELECTED_DEVICE: ${{ inputs.FILE }}
           SPOOF_SUBLEVEL: ${{ inputs.RESUBLEVEL }}
           FAST_SELECTED: ${{ inputs.FAST_BUILD }}
+          LOG_MODE: ${{ inputs.C17_BOOTLOG }}
         run: |
           test "$SELECTED_DEVICE" = oneplus_13_b
           test -z "$SPOOF_SUBLEVEL"
           test "$FAST_SELECTED" = true
+          test "$LOG_MODE" = enforcing
           echo 'C17 boot diagnostics: real OP13 6.6.118 only, no SUBLEVEL spoofing.'
 
       - name: Maximize Build Space
@@ -228,7 +229,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          for file in scripts/c17_bootlog.py scripts/validate_c17_bootlog_device.py scripts/test_ramoops_adapter.py \
+          for file in scripts/c17_bootlog.py scripts/validate_c17_bootlog_device.py scripts/test_ramoops_adapter.py scripts/test_c17_bootlog.py scripts/test_ramoops_flush.py \
+            scripts/c17-bootlog/ramoops-flush.c \
             scripts/c17-bootlog/ramoops-qcom-early.c scripts/c17-bootlog/README.txt \
             scripts/c17-bootlog/collect.sh scripts/c17-bootlog/post-fs-data.sh \
             scripts/c17-bootlog/module.prop; do
@@ -238,6 +240,7 @@ jobs:
           done
           python3 -m py_compile "$GITHUB_WORKSPACE/scripts/c17_bootlog.py"
           python3 "$GITHUB_WORKSPACE/scripts/test_ramoops_adapter.py"
+          python3 "$GITHUB_WORKSPACE/scripts/test_ramoops_flush.py"
           sh -n "$GITHUB_WORKSPACE/scripts/c17-bootlog/collect.sh"
           sh -n "$GITHUB_WORKSPACE/scripts/c17-bootlog/post-fs-data.sh"
 
@@ -1178,6 +1181,8 @@ jobs:
         env:
           DIAGNOSTIC_MODE: ${{ inputs.C17_BOOTLOG }}
         run: |
+          python3 "$GITHUB_WORKSPACE/scripts/test_c17_bootlog.py" \
+            --kernel "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
           python3 "$GITHUB_WORKSPACE/scripts/c17_bootlog.py" prepare \
             --kernel "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common" \
             --mode "$DIAGNOSTIC_MODE" --report "$GITHUB_WORKSPACE/c17-bootlog-report"

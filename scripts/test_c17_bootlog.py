@@ -11,26 +11,30 @@ spec = importlib.util.spec_from_file_location("bootlog", Path(__file__).with_nam
 bootlog = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bootlog)
 
-def fixture(root, reference):
+def fixture(root, reference, kernel=None):
     mapping = {
         "Makefile": "Makefile", "ram.c": "fs/pstore/ram.c",
         "security.h": "security/selinux/include/security.h",
         "hooks.c": "security/selinux/hooks.c", "selinuxfs.c": "security/selinux/selinuxfs.c",
         "gki_defconfig": "arch/arm64/configs/gki_defconfig",
+        "reboot.c": "kernel/reboot.c",
     }
     for src, dest in mapping.items():
         p = root / dest
         p.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(reference / src, p)
+        shutil.copyfile(kernel / dest if kernel else reference / src, p)
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--reference", required=True, type=Path)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--reference", type=Path)
+    source.add_argument("--kernel", type=Path)
     args = p.parse_args()
     with tempfile.TemporaryDirectory(prefix="c17-bootlog-test-") as temp:
-        for mode in ("enforcing", "permissive"):
+        for mode in ("enforcing",):
             root = Path(temp) / mode
-            fixture(root, args.reference)
+            fixture(root, args.reference, args.kernel)
+            before = bootlog.selinux_hashes(root)
             report = root / "report"
             report.mkdir()
             bootlog.prepare(root, mode, report)
@@ -40,17 +44,26 @@ def main():
             assert ram.count('static int ramoops_parse_op13_dt(') == 1
             assert ram.count('{ .compatible = "qcom,ramoops" },') == 1
             assert ram.count('postcore_initcall(ramoops_init);') == 1
-            assert ram.index('err = pstore_register(') < ram.index('C17_BOOTLOG_V2: early DT backend ready')
+            assert ram.index('err = pstore_register(') < ram.index('C17_BOOTLOG_V3: early DT backend ready')
             assert ram.count('platform_device_register_data(') == 1  # Original dummy only.
             assert 'rmem->base' in ram and '0x880000000' not in ram
-            if mode == "enforcing":
-                assert (root / "security/selinux/selinuxfs.c").read_bytes() == (args.reference / "selinuxfs.c").read_bytes()
-                assert (root / "security/selinux/include/security.h").read_bytes() == (args.reference / "security.h").read_bytes()
-            else:
-                assert "new_value = false;" in (root / "security/selinux/selinuxfs.c").read_text()
+            assert before == bootlog.selinux_hashes(root)
+            reboot = (root / "kernel/reboot.c").read_text().split('void kernel_restart(char *cmd)', 1)[1]
+            assert reboot.index('kmsg_dump(KMSG_DUMP_SHUTDOWN);') < reboot.index('kernel_restart_prepare(cmd);')
+            assert reboot.index('kernel_restart_prepare(cmd);') < reboot.index('machine_restart(cmd);')
             (root / "out").mkdir()
             shutil.copyfile(root / "arch/arm64/configs/gki_defconfig", root / "out/.config")
             bootlog.verify(root, mode, report)
+            security = root / 'security/selinux/include/security.h'
+            original_security = security.read_bytes()
+            security.write_bytes(original_security + b'\n/* unexpected edit */\n')
+            try:
+                bootlog.verify(root, mode, report)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('SELinux source modification accepted')
+            security.write_bytes(original_security)
             original_ram = (root / "fs/pstore/ram.c").read_text()
             (root / "fs/pstore/ram.c").write_text(original_ram.replace('"qcom,ramoops"', '"not-qcom,ramoops"'))
             try:
@@ -77,18 +90,28 @@ def main():
                 raise AssertionError("Invalid effective config accepted")
             assert not json.loads((report / "configuration-validation.json").read_text())["passed"]
         bad = Path(temp) / "wrong-version"
-        fixture(bad, args.reference)
+        fixture(bad, args.reference, args.kernel)
         mf = bad / "Makefile"
         mf.write_text(mf.read_text().replace("SUBLEVEL = 118", "SUBLEVEL = 119"))
         report = bad / "report"
         report.mkdir()
         try:
-            bootlog.prepare(bad, "permissive", report)
+            bootlog.prepare(bad, "enforcing", report)
         except RuntimeError:
             pass
         else:
             raise AssertionError("Wrong version accepted")
-    print("PASS: actual-source anchors, both modes, no SELinux edit in enforcing mode, reapply guard, effective-config guard, version guard")
+        denied = Path(temp) / 'permissive-denied'
+        fixture(denied, args.reference, args.kernel)
+        untouched = (denied / 'fs/pstore/ram.c').read_bytes()
+        try:
+            bootlog.prepare(denied, 'permissive', Path(temp))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('Permissive accepted')
+        assert (denied / 'fs/pstore/ram.c').read_bytes() == untouched
+    print("PASS: source anchors, SELinux unchanged/tamper guard, permissive rejected, reboot ordering, reapply/config/version guards")
 
 if __name__ == "__main__":
     main()

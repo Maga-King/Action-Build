@@ -122,6 +122,12 @@ def main():
     assert device.assess("C17LOG2", expected, "", "")["ready_before_userspace_init"] is None
     late = early.replace("0.15", "2.15")
     assert device.assess("C17LOG2", expected, "", late)["ready_before_userspace_init"] is False
+    v3 = early.replace('C17_BOOTLOG_V2', 'C17_BOOTLOG_V3')
+    params3 = dict(expected, mem_type=2)
+    assert all(v is True for v in device.assess('C17LOG3', params3, '/sys/bus/platform/drivers/ramoops', v3, 3).values())
+    assert not device.assess('C17LOG2', params3, '', v3, 3)['diagnostic_kernel']
+    assert not device.assess('C17LOG3', expected, '', v3, 3)['cached_mapping_reported']
+    assert device.assess('C17LOG3', params3, '', early, 3)['ready_before_userspace_init'] is None
     print("PASS: CRLF parsing and early/late/missing evidence checks")
 
 
