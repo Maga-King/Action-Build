@@ -195,9 +195,6 @@ jobs:
       CCACHE_IS_KERNEL_COMPILING: "true"
       CCACHE_MAXSIZE: 5G
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
       - name: Validate C17 diagnostic selection
         if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
         env:
@@ -220,6 +217,27 @@ jobs:
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
+
+      # The space action mounts a new filesystem over GITHUB_WORKSPACE.
+      # Checkout MUST happen afterwards or our diagnostic tools are hidden.
+      - name: Checkout after build-space mount
+        uses: actions/checkout@v6
+
+      - name: Verify C17 diagnostic tools before downloading kernel sources
+        if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          for file in scripts/c17_bootlog.py scripts/c17-bootlog/README.txt \
+            scripts/c17-bootlog/collect.sh scripts/c17-bootlog/post-fs-data.sh \
+            scripts/c17-bootlog/module.prop; do
+            git ls-files --error-unmatch "$file" >/dev/null
+            test -s "$GITHUB_WORKSPACE/$file"
+            sha256sum "$GITHUB_WORKSPACE/$file"
+          done
+          python3 -m py_compile "$GITHUB_WORKSPACE/scripts/c17_bootlog.py"
+          sh -n "$GITHUB_WORKSPACE/scripts/c17-bootlog/collect.sh"
+          sh -n "$GITHUB_WORKSPACE/scripts/c17-bootlog/post-fs-data.sh"
 
       - name: Extract Manifest Info
         id: extract_info
@@ -1154,12 +1172,13 @@ jobs:
 
       - name: Prepare C17 boot diagnostics
         if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        working-directory: ${{ github.workspace }}
         env:
           DIAGNOSTIC_MODE: ${{ inputs.C17_BOOTLOG }}
         run: |
-          python3 scripts/c17_bootlog.py prepare \
-            --kernel kernel_workspace/kernel_platform/common \
-            --mode "$DIAGNOSTIC_MODE" --report c17-bootlog-report
+          python3 "$GITHUB_WORKSPACE/scripts/c17_bootlog.py" prepare \
+            --kernel "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common" \
+            --mode "$DIAGNOSTIC_MODE" --report "$GITHUB_WORKSPACE/c17-bootlog-report"
 
       - name: Fix IPv6_NAT Error
         if: ${{ github.event.inputs.NETFILTER == 'true' }}
@@ -1535,13 +1554,14 @@ jobs:
 
       - name: Package C17 diagnostic helpers
         if: ${{ inputs.C17_BOOTLOG != '' && inputs.C17_BOOTLOG != 'off' }}
+        working-directory: ${{ github.workspace }}
         env:
           DIAGNOSTIC_MODE: ${{ inputs.C17_BOOTLOG }}
         run: |
-          python3 scripts/c17_bootlog.py package \
-            --kernel kernel_workspace/kernel_platform/common \
-            --mode "$DIAGNOSTIC_MODE" --report c17-bootlog-report
-          cp scripts/c17-bootlog/README.txt AnyKernel3/C17-BOOTLOG-README.txt
+          python3 "$GITHUB_WORKSPACE/scripts/c17_bootlog.py" package \
+            --kernel "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common" \
+            --mode "$DIAGNOSTIC_MODE" --report "$GITHUB_WORKSPACE/c17-bootlog-report"
+          cp "$GITHUB_WORKSPACE/scripts/c17-bootlog/README.txt" AnyKernel3/C17-BOOTLOG-README.txt
           printf '%s\n' "$DIAGNOSTIC_MODE" > AnyKernel3/C17-DIAGNOSTIC-MODE.txt
 
       - name: Upload C17 diagnostic evidence and optional metadata collector
