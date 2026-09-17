@@ -36,6 +36,13 @@ def main():
             bootlog.prepare(root, mode, report)
             assert bootlog.config_values(root / "arch/arm64/configs/gki_defconfig").items() >= bootlog.REQUIRED.items()
             assert (root / "fs/pstore/ram.c").read_text().count("existing OP13 reserved region") == 1
+            ram = (root / "fs/pstore/ram.c").read_text()
+            assert ram.count('static int ramoops_parse_op13_dt(') == 1
+            assert ram.count('{ .compatible = "qcom,ramoops" },') == 1
+            assert ram.count('postcore_initcall(ramoops_init);') == 1
+            assert ram.index('err = pstore_register(') < ram.index('C17_BOOTLOG_V2: early DT backend ready')
+            assert ram.count('platform_device_register_data(') == 1  # Original dummy only.
+            assert 'rmem->base' in ram and '0x880000000' not in ram
             if mode == "enforcing":
                 assert (root / "security/selinux/selinuxfs.c").read_bytes() == (args.reference / "selinuxfs.c").read_bytes()
                 assert (root / "security/selinux/include/security.h").read_bytes() == (args.reference / "security.h").read_bytes()
@@ -44,6 +51,15 @@ def main():
             (root / "out").mkdir()
             shutil.copyfile(root / "arch/arm64/configs/gki_defconfig", root / "out/.config")
             bootlog.verify(root, mode, report)
+            original_ram = (root / "fs/pstore/ram.c").read_text()
+            (root / "fs/pstore/ram.c").write_text(original_ram.replace('"qcom,ramoops"', '"not-qcom,ramoops"'))
+            try:
+                bootlog.verify(root, mode, report)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("Altered early adapter accepted")
+            (root / "fs/pstore/ram.c").write_text(original_ram)
             try:
                 bootlog.prepare(root, mode, report)
             except RuntimeError:

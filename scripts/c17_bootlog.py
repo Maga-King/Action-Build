@@ -15,6 +15,7 @@ REQUIRED = {
     "LOG_BUF_SHIFT": "22", "KALLSYMS": "y", "PSTORE": "y", "PSTORE_RAM": "y",
     "PSTORE_CONSOLE": "y", "PSTORE_PMSG": "y", "PSTORE_DEFAULT_KMSG_BYTES": "262144",
     "SECURITY_SELINUX": "y", "SECURITY_SELINUX_DEVELOP": "y",
+    "OF": "y", "OF_RESERVED_MEM": "y",
 }
 
 RAM_ANCHOR = "\tif (!pdata->mem_size || (!pdata->record_size && !pdata->console_size &&"
@@ -34,6 +35,25 @@ RAM_PATCH = """\t/* C17_BOOTLOG: use only the existing OP13 reserved region. */
 \t}
 
 """
+
+def early_ramoops_source(original):
+    """Bind the existing qcom DT node before userspace, without duplicate devices."""
+    fragment = (Path(__file__).parent / "c17-bootlog/ramoops-qcom-early.c").read_text()
+    patched = replace_once(original, "#include <linux/of_address.h>\n",
+                           "#include <linux/of_address.h>\n#include <linux/of_reserved_mem.h>\n")
+    anchor = "static int ramoops_parse_dt(struct platform_device *pdev,"
+    patched = replace_once(patched, anchor, fragment + "\n" + anchor)
+    anchor = '\tdev_dbg(&pdev->dev, "using Device Tree\\n");'
+    patched = replace_once(patched, anchor,
+        '\tif (of_device_is_compatible(of_node, "qcom,ramoops"))\n'
+        '\t\treturn ramoops_parse_op13_dt(pdev, pdata);\n\n' + anchor)
+    patched = replace_once(patched, '\t{ .compatible = "ramoops" },',
+        '\t{ .compatible = "ramoops" },\n\t{ .compatible = "qcom,ramoops" },')
+    anchor = '\t/*\n\t * Update the module parameter variables as well so they are visible'
+    patched = replace_once(patched, anchor,
+        '\tif (of_device_is_compatible(dev_of_node(dev), "qcom,ramoops"))\n'
+        '\t\tdev_info(dev, "C17_BOOTLOG_V2: early DT backend ready\\n");\n\n' + anchor)
+    return replace_once(patched, RAM_ANCHOR, RAM_PATCH + RAM_ANCHOR)
 
 def replace_once(text, old, new):
     if text.count(old) != 1:
@@ -56,7 +76,7 @@ def prepare(kernel, mode, report):
     original = ram.read_text()
     if "C17_BOOTLOG:" in original:
         raise RuntimeError("Diagnostic patch is already present; use a clean source tree")
-    edits[ram] = replace_once(original, RAM_ANCHOR, RAM_PATCH + RAM_ANCHOR)
+    edits[ram] = early_ramoops_source(original)
     if mode == "permissive":
         security = kernel / "security/selinux/include/security.h"
         edits[security] = replace_once(security.read_text(),
@@ -100,6 +120,10 @@ def prepare(kernel, mode, report):
         "original_layout": "0x240000 total, 0x40000 console, 0x200000 pmsg, no dmesg",
         "new_layout": "0x40000 dmesg, 0x100000 console, 0x100000 pmsg",
         "cold_boot_retention_guaranteed": False,
+        "diagnostic_revision": 2,
+        "early_backend": "builtin ramoops binds existing qcom,ramoops DT device",
+        "vendor_module_removed": False,
+        "ram_source_sha256": hashlib.sha256(edits[ram].encode()).hexdigest(),
     }, indent=2) + "\n")
     print(f"Prepared OP13 {version(kernel)} diagnostic mode={mode}")
 
@@ -110,8 +134,14 @@ def verify(kernel, mode, report):
               for k, v in REQUIRED.items() if actual.get(k) != v]
     if version(kernel) != "6.6.118":
         errors.append("Kernel version changed after preparation")
-    if "C17_BOOTLOG:" not in (kernel / "fs/pstore/ram.c").read_text():
-        errors.append("Ramoops source patch missing")
+    ram_source = (kernel / "fs/pstore/ram.c").read_text()
+    evidence = json.loads((report / "build-mode.json").read_text())
+    if hashlib.sha256(ram_source.encode()).hexdigest() != evidence.get("ram_source_sha256"):
+        errors.append("Ramoops source differs from the prepared and recorded patch")
+    for required in ('ramoops_parse_op13_dt', '"qcom,ramoops"',
+                     'C17_BOOTLOG_V2: early DT backend ready', 'postcore_initcall(ramoops_init)'):
+        if required not in ram_source:
+            errors.append(f"Early ramoops source missing: {required}")
     security = (kernel / "security/selinux/include/security.h").read_text()
     if mode == "permissive" and "WRITE_ONCE(selinux_state.enforcing, false);" not in security:
         errors.append("Permissive source patch missing")
@@ -130,6 +160,8 @@ def package(kernel, mode, report):
     source = Path(__file__).parent / "c17-bootlog"
     shutil.copyfile(source / "README.txt", report / "README.txt")
     shutil.copyfile(source / "collect.sh", report / "collect.sh")
+    shutil.copyfile(Path(__file__).parent / "validate_c17_bootlog_device.py",
+                    report / "validate_c17_bootlog_device.py")
     with zipfile.ZipFile(report / "C17-Metadata-Log-Collector-optional.zip", "w",
                          compression=zipfile.ZIP_DEFLATED) as z:
         for name in ("module.prop", "post-fs-data.sh", "collect.sh", "README.txt"):

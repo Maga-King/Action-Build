@@ -228,7 +228,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          for file in scripts/c17_bootlog.py scripts/c17-bootlog/README.txt \
+          for file in scripts/c17_bootlog.py scripts/validate_c17_bootlog_device.py scripts/test_ramoops_adapter.py \
+            scripts/c17-bootlog/ramoops-qcom-early.c scripts/c17-bootlog/README.txt \
             scripts/c17-bootlog/collect.sh scripts/c17-bootlog/post-fs-data.sh \
             scripts/c17-bootlog/module.prop; do
             git ls-files --error-unmatch "$file" >/dev/null
@@ -236,6 +237,7 @@ jobs:
             sha256sum "$GITHUB_WORKSPACE/$file"
           done
           python3 -m py_compile "$GITHUB_WORKSPACE/scripts/c17_bootlog.py"
+          python3 "$GITHUB_WORKSPACE/scripts/test_ramoops_adapter.py"
           sh -n "$GITHUB_WORKSPACE/scripts/c17-bootlog/collect.sh"
           sh -n "$GITHUB_WORKSPACE/scripts/c17-bootlog/post-fs-data.sh"
 
